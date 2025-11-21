@@ -2,68 +2,62 @@ import streamlit as st
 import google.generativeai as genai
 import requests
 from bs4 import BeautifulSoup
-import re
+import time
 
 # -------------------------
 # 1. 基本設定
 # -------------------------
-st.set_page_config(page_title="TrendCast: X Edition", page_icon="❌", layout="wide")
+st.set_page_config(page_title="TrendCast: X-Killer", page_icon="❌", layout="wide")
 
-# デザイン調整
 st.markdown("""
 <style>
-    .stButton button {width: 100%; font-weight: bold; border-radius: 8px;}
+    .stButton button {width: 100%; font-weight: bold; border-radius: 8px; background-color: #1DA1F2; color: white;}
     div[role="radiogroup"] label {padding: 10px; background: #f4f4f4; border-radius: 5px; margin-bottom: 5px;}
 </style>
 """, unsafe_allow_html=True)
 
 # -------------------------
-# 2. Xトレンド取得ロジック（Yahoo経由）
+# 2. Xトレンド取得 (Twittrend経由)
 # -------------------------
-@st.cache_data(ttl=300) # 5分ごとに更新
-def get_x_trends():
-    # Xのトレンドと連動しているYahooリアルタイム検索をターゲットにする
-    url = "https://search.yahoo.co.jp/realtime"
+@st.cache_data(ttl=180) # 3分ごとに更新
+def get_x_trends_robust():
+    # Yahooがダメなら、Twittrend（Xのトレンドまとめサイト）から抜く
+    target_url = "https://twittrend.jp/"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
-    
+
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(target_url, headers=headers, timeout=10)
         response.raise_for_status()
-        
         soup = BeautifulSoup(response.text, 'html.parser')
         
         trends = []
-        # Yahooリアルタイムのランキング構造解析
-        # 構造が変わってもある程度拾えるように汎用的なクラス検索を行う
-        ranking_items = soup.find_all('li', class_=re.compile("Ranking_item"))
-
-        # もしクラス名が変わっていて取れない場合の予備検索
-        if not ranking_items:
-             ranking_items = soup.select('div[class*="Ranking_item"] a')
-
-        for idx, item in enumerate(ranking_items):
-            if idx >= 20: break # TOP20まで
-            
-            # テキスト抽出
-            title = item.get_text(strip=True)
-            # 順位番号（1位など）がテキストに含まれる場合があるので削除（整形）
-            title = re.sub(r'^\d+位\s*', '', title)
-            
-            # リンク取得
-            link_tag = item.find('a') if item.name != 'a' else item
-            link = link_tag['href'] if link_tag else url
-            
-            trends.append({
-                "rank": idx + 1,
-                "title": title,
-                "link": link
-            })
-            
+        
+        # Twittrendの日本全体のランキングを取得
+        # id="now" の中の ul > li を探す
+        now_div = soup.find('div', id='now')
+        if now_div:
+            items = now_div.find_all('li')
+            for idx, item in enumerate(items):
+                if idx >= 20: break # TOP20
+                
+                title_tag = item.find('p', class_='title')
+                if title_tag:
+                    title = title_tag.get_text(strip=True)
+                    # リンク生成（Xの検索ページへ飛ばす）
+                    link = f"https://twitter.com/search?q={title}"
+                    
+                    trends.append({
+                        "rank": idx + 1,
+                        "title": title,
+                        "link": link
+                    })
+        
         return trends
 
     except Exception as e:
+        st.error(f"データソース接続エラー: {e}")
         return []
 
 # -------------------------
@@ -71,51 +65,30 @@ def get_x_trends():
 # -------------------------
 def generate_content(api_key, topic, mode):
     if not api_key:
-        return "⚠️ APIキーが設定されていません。"
+        return "⚠️ エラー: サイドバーにAPIキーを入れてください。"
     
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-1.5-flash')
     
-    # ユーザーの要望に合わせて台本精度を強化
     prompts = {
-        "動画台本": f"""
-        キーワード「{topic}」について、X（Twitter）での反応を予測してショート動画の台本を作れ。
-        【条件】
-        - 冒頭：視聴者が「えっ？」となる強いフック。
-        - 内容：事実を淡々と述べるのではなく、ネット民の反応や議論のポイントを盛り込む。
-        - 結び：コメント欄への誘導（「みんなはどう思う？」など）。
-        - 構成：タイトル、フック、本文（30秒分）、オチ。
-        """,
-        "まとめニュース記事": f"""
-        キーワード「{topic}」について、まとめサイト風の記事を作成せよ。
-        【条件】
-        - タイトル：クリックしたくなる煽り気味のもの。
-        - 構成：
-          1. 何が起きた？（3行で要約）
-          2. ネットの反応（肯定的な意見と否定的な意見を架空のコメント形式で）
-          3. 管理人の所感
-        """,
-        "Xポスト作成": f"""
-        キーワード「{topic}」を使って、インプレッションを稼ぐポストを作れ。
-        - 140字以内
-        - 共感を呼ぶか、あえて反論を招く文章
-        - 関連ハッシュタグ3つ
-        """
+        "動画": f"キーワード「{topic}」について、X（Twitter）民が食いつくショート動画の台本を作れ。\n構成：衝撃的なタイトル、冒頭のフック、本題（ネットの反応含む）、オチ。\n口調：辛口かつテンポよく。",
+        "ニュース": f"キーワード「{topic}」について、まとめサイト風の記事を作れ。\n構成：煽りタイトル、3行要約、肯定・否定それぞれのネットの反応（架空）、結論。",
+        "ポスト": f"キーワード「{topic}」について、インプレッション稼ぎ用のXポストを作れ。\n条件：140字以内、問いかけを入れる、ハッシュタグ3つ。"
     }
     
     try:
         response = model.generate_content(prompts[mode])
         return response.text
     except Exception as e:
-        return f"生成エラー: {e}"
+        return f"AIエラー: {e}"
 
 # -------------------------
-# 4. UI構築
+# 4. UIメイン
 # -------------------------
 with st.sidebar:
-    st.title("❌ X-Trend Cast")
+    st.header("❌ X-Trend Cast")
     
-    # APIキー入力
+    # APIキー
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
         st.success("API Key: OK")
@@ -124,40 +97,40 @@ with st.sidebar:
     
     st.divider()
     
-    if st.button("🔥 Xトレンド更新"):
+    if st.button("🔥 トレンド強制更新"):
         st.cache_data.clear()
         st.rerun()
     
-    # データ取得
-    trends = get_x_trends()
+    # データ取得実行
+    trends = get_x_trends_robust()
     
     if trends:
-        trend_options = [f"{t['rank']}位: {t['title']}" for t in trends]
-        selected_option = st.radio("ネタ選択", trend_options)
+        trend_list = [f"{t['rank']}位: {t['title']}" for t in trends]
+        selected_label = st.radio("トレンド選択", trend_list)
         
-        # 選択データ取得
-        selected_index = trend_options.index(selected_option)
-        current_trend = trends[selected_index]
+        # 選択データ抽出
+        idx = trend_list.index(selected_label)
+        current_trend = trends[idx]
     else:
         current_trend = None
-        st.error("トレンド取得失敗。時間をおいて再試行してください。")
+        st.error("トレンド取得失敗。ソースサイトがダウンしている可能性があります。")
 
-# メイン画面
+# 右側エリア
 if current_trend:
-    st.header(f"話題: {current_trend['title']}")
-    st.markdown(f"[Yahooリアルタイム検索で見る]({current_trend['link']})")
+    st.title(f"話題: {current_trend['title']}")
+    st.markdown(f"🔗 [Xで検索する]({current_trend['link']})")
     
-    tab1, tab2, tab3 = st.tabs(["🎥 動画台本", "📑 まとめ記事", "🐦 Xポスト"])
+    tab1, tab2, tab3 = st.tabs(["🎥 動画台本", "📑 まとめニュース", "🐦 拡散ポスト"])
     
     with tab1:
         if st.button("台本生成", key="v"):
-            st.write(generate_content(api_key, current_trend['title'], "動画台本"))
+            st.write(generate_content(api_key, current_trend['title'], "動画"))
     with tab2:
-        if st.button("記事生成", key="b"):
-            st.write(generate_content(api_key, current_trend['title'], "まとめニュース記事"))
+        if st.button("記事生成", key="n"):
+            st.write(generate_content(api_key, current_trend['title'], "ニュース"))
     with tab3:
-        if st.button("ポスト生成", key="x"):
-            st.write(generate_content(api_key, current_trend['title'], "Xポスト作成"))
+        if st.button("ポスト生成", key="p"):
+            st.write(generate_content(api_key, current_trend['title'], "ポスト"))
 
 else:
-    st.info("サイドバーの「Xトレンド更新」を押してデータを取得してください。")
+    st.warning("👈 サイドバーの更新ボタンを押してください")
