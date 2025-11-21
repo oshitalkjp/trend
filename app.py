@@ -1,7 +1,6 @@
 import streamlit as st
 import google.generativeai as genai
 import feedparser
-import time
 
 # -------------------------
 # 1. ページ設定 & デザイン調整
@@ -19,6 +18,13 @@ st.markdown("""
     .stButton button {width: 100%; border-radius: 8px; font-weight: bold;}
     .block-container {padding-top: 2rem;}
     div[data-testid="stExpander"] {border: 1px solid #ddd; border-radius: 8px;}
+    /* 選択中のトレンドを目立たせる */
+    div[role="radiogroup"] label {
+        background-color: #f0f2f6;
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 5px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -27,21 +33,25 @@ st.markdown("""
 # -------------------------
 
 # Googleトレンド（RSS）から取得する安定版関数
-@st.cache_data(ttl=3600) # 1時間キャッシュして高速化
+@st.cache_data(ttl=3600) # 1時間キャッシュ
 def get_trends_rss():
-    # Googleトレンドの日本版RSS
     rss_url = "https://trends.google.co.jp/trends/trendingsearches/daily/rss?geo=JP"
-    feed = feedparser.parse(rss_url)
-    
-    trends = []
-    for entry in feed.entries:
-        trends.append({
-            "title": entry.title,
-            "link": entry.link,
-            "traffic": entry.get('ht_approx_traffic', 'N/A'), # 推定検索数
-            "pubDate": entry.published
-        })
-    return trends
+    try:
+        feed = feedparser.parse(rss_url)
+        trends = []
+        if not feed.entries:
+            return [] # 空の場合は空リストを返す
+            
+        for entry in feed.entries:
+            trends.append({
+                "title": entry.title,
+                "link": entry.link,
+                "traffic": entry.get('ht_approx_traffic', 'N/A'),
+                "pubDate": entry.published
+            })
+        return trends
+    except Exception:
+        return []
 
 # AI生成関数
 def generate_content(api_key, topic, mode):
@@ -82,11 +92,12 @@ def generate_content(api_key, topic, mode):
     
     prompt = prompts.get(mode, prompts["YouTubeショート/TikTok"])
     
-    try:
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"AI生成エラー: {e}"
+    with st.spinner("AIが執筆中..."):
+        try:
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            return f"AI生成エラー: {e}"
 
 # -------------------------
 # 3. アプリのUI構築
@@ -96,7 +107,7 @@ def generate_content(api_key, topic, mode):
 with st.sidebar:
     st.header("⚡ TrendCast Pro")
     
-    # APIキー設定（Secrets対応）
+    # APIキー設定
     if "GEMINI_API_KEY" in st.secrets:
         api_key = st.secrets["GEMINI_API_KEY"]
         st.success("API Key: 連携済み")
@@ -111,49 +122,61 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-    # トレンド取得
+    # トレンド取得実行
     trends_data = get_trends_rss()
     
-    # トレンド選択用ラジオボタン（見た目をリスト風に）
-    trend_titles = [f"{t['title']} ({t['traffic']})" for t in trends_data]
-    selected_trend_str = st.radio("分析するネタを選択:", trend_titles)
+    # --- 修正ポイント: データ存在チェック ---
+    selected_index = 0
+    current_trend = None
     
-    # 選択されたトレンドのデータを取り出す
-    selected_index = trend_titles.index(selected_trend_str)
-    current_trend = trends_data[selected_index]
+    if trends_data:
+        trend_titles = [f"{t['title']} ({t['traffic']})" for t in trends_data]
+        selected_trend_str = st.radio("分析するネタを選択:", trend_titles)
+        
+        # インデックス検索の安全化（ここがエラー原因だった場所）
+        try:
+            selected_index = trend_titles.index(selected_trend_str)
+        except (ValueError, AttributeError):
+            selected_index = 0 # 見つからない場合は先頭を選択
+            
+        current_trend = trends_data[selected_index]
+    else:
+        st.warning("トレンド情報を取得できませんでした。時間をおいて更新してください。")
 
 # --- メイン画面 ---
-st.subheader(f"ネタ候補: {current_trend['title']}")
 
-# リンクボタン表示
-st.markdown(f"🔗 [ニュース検索結果を見る]({current_trend['link']})", unsafe_allow_html=True)
+if current_trend:
+    # タイトルとリンク
+    st.title(f"🔥 {current_trend['title']}")
+    st.caption(f"検索ボリューム: {current_trend['traffic']} | 更新: {current_trend['pubDate']}")
+    st.markdown(f"🔗 [このニュースの検索結果を見る]({current_trend['link']})", unsafe_allow_html=True)
 
-st.divider()
+    st.divider()
 
-# 生成モード選択タブ
-tab1, tab2, tab3 = st.tabs(["📱 ショート動画", "📝 ブログ記事", "🐦 Xポスト"])
+    # タブUI
+    tab1, tab2, tab3 = st.tabs(["📱 ショート動画", "📝 ブログ記事", "🐦 Xポスト"])
 
-# 生成実行と表示
-if api_key:
     # タブ1: ショート動画
     with tab1:
+        st.info("ショート動画・TikTok用の台本を作成します")
         if st.button("🚀 動画台本を生成", key="btn_video"):
-            with st.spinner("AIが台本を執筆中..."):
-                result = generate_content(api_key, current_trend['title'], "YouTubeショート/TikTok")
-                st.text_area("出力結果", result, height=400)
+            result = generate_content(api_key, current_trend['title'], "YouTubeショート/TikTok")
+            st.text_area("出力結果", result, height=400)
                 
     # タブ2: ブログ
     with tab2:
+        st.info("SEOを意識したブログ記事の構成案を作成します")
         if st.button("🖋 記事構成を生成", key="btn_blog"):
-            with st.spinner("AIが記事を構成中..."):
-                result = generate_content(api_key, current_trend['title'], "ブログ/ニュース解説")
-                st.text_area("出力結果", result, height=400)
+            result = generate_content(api_key, current_trend['title'], "ブログ/ニュース解説")
+            st.text_area("出力結果", result, height=400)
 
     # タブ3: Xポスト
     with tab3:
+        st.info("拡散を狙ったX（Twitter）の投稿文を作成します")
         if st.button("🐦 ポストを作成", key="btn_x"):
-            with st.spinner("AIがポストを作成中..."):
-                result = generate_content(api_key, current_trend['title'], "X (Twitter) ポスト")
-                st.text_area("出力結果", result, height=200)
+            result = generate_content(api_key, current_trend['title'], "X (Twitter) ポスト")
+            st.text_area("出力結果", result, height=200)
+
 else:
-    st.warning("👈 まずはサイドバーでAPIキーを設定してください")
+    # データがない時の表示
+    st.info("👈 サイドバーの「最新情報を更新」ボタンを押すか、しばらく待ってください。")
